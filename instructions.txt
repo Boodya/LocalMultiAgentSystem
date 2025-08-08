@@ -1,0 +1,131 @@
+ТЗ: Локальная система многоагентного бота на Windows с использованием RTX 4090 и gpt‑oss‑20b (PoC → production-ready)
+Кратко: вы получите поэтапный план и требования для разработки локального прототипа (PoC) агентной системы, которая будет запускать gpt‑oss‑20b локально на Windows с RTX 4090, управлять инструментами (поиск в браузере, скриншоты, ограничённый PowerShell, git/VS‑проект через CLI), иметь оркестратор агентов и безопасный sandbox для выполнения «опасных» команд. ТЗ сформулировано так, чтобы нейросеть (Copilot / автозаполнение) могла однозначно понять задачу и сгенерировать код/скрипты.
+
+1. Цели и критерии приёмки
+Цель PoC: запустить локальную систему, где LLM (gpt‑oss‑20b) получает задачу «сделай ресёрч + создай каркас проекта», использует браузерный поиск и CLI для создания проекта, выполняет сборку и тесты; при этом все «опасные» операции идут через контролируемый API и требуют подтверждения. Критерии приёмки: система возвращает структурированный отчёт с источниками, создаёт проект-скелет в git и успешно проходит базовые тесты (build + unit test).
+Критерии безопасности: все команды с эффектом на систему выполняются в изолированной VM/Docker с автоматическими snapshot/rollback; выполнение PowerShell/GUI требует явного human-approve (ручного подтверждения) для первых два­х запусков фичи.
+Надёжность: операции логируются; есть возможность повторного запуска задач и отката. PoC должен работать локально на Windows с RTX 4090 либо, при невозможности размещения модели полностью на 4090, — с fallback на облачный inference.
+2. Аппаратные и ПО‑требования
+Операционная система: Windows 11 (64‑bit) с админ‑доступом. Для изоляции возможно использовать Hyper‑V/VirtualBox/VMware.
+GPU: RTX 4090 (24 GB VRAM). Примечание: gpt‑oss quantized (mxfp4) лучше работает на Hopper/Blackwell; на 4090 потребуется 4‑bit/8‑bit quantization (bitsandbytes) + CPU offload или запуск с частичным оффлоадом в vLLM/transformers; возможен fallback к облачному инференсу.
+Драйверы и библиотеки: CUDA 12.x (соответствующая версии PyTorch), cuDNN, правильная версия PyTorch (под CUDA), bitsandbytes, transformers >= актуальной версии, accelerate, vLLM (опционально). Установочные команды и версии будут указаны в разделе «Развертывание».
+Язык/инструменты разработки: Python 3.11+, Visual Studio (или VS Code) с Git и Copilot. Рекомендуется создать виртуальное окружение (venv) и управлять зависимостями через requirements.txt.
+Доп. инструменты: Playwright (для браузерной автоматизации), git, PowerShell, pyautogui/pynput (только в sandbox), Tesseract/ocr (если нужно распознавание скринов).
+3. Архитектура системы (высокоуровневая)
+Компоненты: локальный LLM-интерфейс (wrapper для gpt‑oss), оркестратор агентов (Agent Manager), набор инструментов (Toolbox) — API‑эндпоинты для: browser_search, screenshot+OCR, shell_exec (ограниченный), file_ops, git_ops, project_builder, keyboard_mouse (только в sandbox), human_approval. Каждый инструмент имеет чёткий вход/выход (JSON) и ACL (whitelist команд/параметров).
+Коммуникация: все компоненты общаются через локальный HTTP JSON API (FastAPI) либо через grpc. Оркестратор получает задачу, делит на подзадачи, вызывает агентов (LLM-инстансы) и инструменты, собирает результаты и возвращает их клиенту.
+Изоляция: все действия, изменяющие систему/файлы/сеть, делаются внутри VM (Hyper‑V) или Docker-контейнера, у которого есть snapshot и возможность rollback. Контейнер/VM монтирует рабочую папку проекта, а основной Windows‑хост остаётся защищён.
+Логирование/мониторинг: централизованные логи (JSON) с трассировкой запросов, ответов, выполненных команд, хэшем модели и версиями промптов; метрики: время выполнения, RAM/VRAM usage, ошибки.
+4. API инструментария — спецификация (JSON)
+Каждый эндпоинт возвращает JSON с полями: request_id, status (ok/error/pending), output, logs, artifacts (список путей/URL).
+
+4.1. /tool/browser_search (POST) — принимает { "query": string, "max_results": int } и возвращает список результатов {title, url, snippet, retrieval_time}. Важно: включить поля source_id и timestamp.
+
+4.2. /tool/screenshot (POST) — принимает { "target": "url" | "window_title" | "desktop", "region": optional rect } и возвращает { "image_path": string, "ocr_text": string, "meta": {...} }.
+
+4.3. /tool/shell_exec (POST) — принимает { "cmd": string, "cwd": string, "whitelist_token": string } и возвращает { "stdout": string, "stderr": string, "exit_code": int }. Важно: shell_exec внутри sandbox; whitelist_token подтверждает разрешённые команды; крупные изменения требуют human_approval.
+
+4.4. /tool/git_ops (POST) — принимает { "action": "init"|"commit"|"push"|"create_branch"|"merge", "params": {...} } и возвращает { "result": string, "commit_hash": optional }.
+
+4.5. /tool/project_builder (POST) — принимает { "template": "dotnet"|"node"|"python"|"cmake", "name": string, "options": {...} } и возвращает { "project_path": string, "build_status": "success"|... , "test_summary": {...} }.
+
+4.6. /tool/human_approval (POST/GET) — POST создает запрос approval с полями { "request_id", "description", "effects", "timeout" }, GET возвращает статус approval. Любой запрос, помеченный as_dangerous, блокируется до получения approval.
+
+(Каждый bullet выше — отдельный эндпоинт; в реализации все должны валидироваться и логироваться.)
+
+5. Поведение агентов / промпт-шаблоны
+Используйте structured message format: system / assistant / user, с JSON-инструкцией внутри content для task planning.
+
+Пример system prompt (одна строка для LLM): вы — агент с ролью {role_name}, отвечаете в формате JSON, не выполняете ничего напрямую, а возвращаете план из шагов и вызовы инструментов.
+
+Пример запроса к LLM (user):
+{ "task": "создай проект на dotnet для REST API и протестируй", "constraints": ["use dotnet cli", "unit tests required"], "output_format": "PLAN_CALLS" }
+
+Ожидаемый ответ LLM (assistant) в формате JSON:
+{ "plan": [ {"step":1,"action":"project_builder","params":{...}}, {"step":2,"action":"git_ops","params":{...}}, {"step":3,"action":"shell_exec","params":{...}} ], "explain": "краткое обоснование", "estimated_time_min": 12 }
+
+Важно: LLM не должен прямо возвращать shell-команды без упаковки в action calls; только оркестратор переводит вызовы в реальные HTTP calls.
+
+6. Стратегии безопасности (обязательные)
+Sandbox: все shell_exec и GUI interactions происходят в VM/контейнере, со snapshot перед каждым «опасным» действием и автоматическим rollback по таймауту/ошибке.
+Whitelists/blacklists: shell_exec принимает только команды из whitelist (dotnet build/test, git commit, npm install и т.д.); админ может расширять список. Команды вне списка требуют human_approval.
+Human-in-the-loop: любой запрос на изменение хоста или интернет‑действия (upload, push to remote) требует ручного подтверждения. Для PoC можно настроить approval через локальный UI (FastAPI web UI) или интеграцию с Telegram/Signal.
+Ограничение привилегий: избегать запуска с админ‑правами; контейнеры имеют вырезанные возможности.
+Журналирование и хранение артефактов: сохранять логи и артефакты с подписью модели/версии/времени.
+7. Развёртывание и требования по моделям (практическая часть)
+Попытка локального запуска gpt‑oss‑20b: сначала проверить, помещается ли модель на RTX 4090 с quantization. Инструкция для prototyping: создать venv, установить PyTorch под вашу версию CUDA, установить transformers, accelerate, bitsandbytes, vLLM (если используете). Попробовать загрузку модели через transformers + device_map="auto" + bnb 4‑bit; если OOM — перейти к cloud‑fallback (Hugging Face inference provider).
+Рекомендуемая последовательность команд (примерные, адаптируйте под вашу CUDA/PyTorch):
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install --upgrade pip
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install transformers accelerate bitsandbytes vllm fastapi uvicorn playwright gitpython python‑tesseract pyautogui
+Пробный инстанс загрузки модели (пример для transformers + bnb):
+from transformers import AutoTokenizer, AutoModelForCausalLM
+tokenizer = AutoTokenizer.from_pretrained("openai/gpt-oss-20b")
+model = AutoModelForCausalLM.from_pretrained("openai/gpt-oss-20b", load_in_4bit=True, device_map="auto")
+затем inference через apply_chat_template / generate
+Фоллбек: если локально не влазит/не работает стабильно — использовать Hugging Face Inference Providers или Groq/Cerebras через API и хранить код так, чтобы смена провайдера была конфигурацией.
+8. PoC‑милиestones и дорожная карта (с тасками и критериями)
+М1 (1–2 недели): среда разработки и базовый LLM‑wrapper. Задачи: настроить Python окружение, убедиться что модель запускается (хоть частично), реализовать простой HTTP wrapper для LLM, создать базовый промпт-шаблон. Критерий: LLM отвечает на тестовые запросы и генерирует JSON‑план.
+
+М2 (2–3 недели): инструментальный слой + оркестратор. Задачи: реализовать FastAPI endpoints для browser_search (Playwright), shell_exec (sandboxed), project_builder (dotnet/node templates), git_ops. Критерий: эндпоинты возвращают валидный JSON и логируют действия.
+
+М3 (2 недели): интеграция агентов и human_approval. Задачи: оркестратор принимает LLM‑plan и выполняет безопасные вызовы; реализовать approval UI. Критерий: система выполняет сценарий «создай проект -> commit -> build -> run tests» в sandbox.
+
+М4 (2–4 недели): жёсткое тестирование, мониторинг, улучшение безопасности. Задачи: добавить тесты безопасности, автоматические snapshot, CI для PoC. Критерий: успешное прохождение тестовых кейсов и откат при ошибках.
+
+9. Acceptance tests / тестовые кейсы
+Ресёрч-запрос: дать задачу «Найди 3 статьи по X и сохрани ссылки», ожидается: array из 3 объектов {title, url, snippet}.
+Создание проекта: «Создай dotnet WebAPI Project name=PoCApi», ожидается: проект создан в sandbox, dotnet build проходит, git commit сделан и возвращён hash.
+Shell restrictions: попытка выполнить запрещённую команду (например rm -rf C:) — должна быть заблокирована и залогирована.
+Human approval: попытка push в удалённый репозиторий — ожидается запрос на approval и блокировка до подтверждения.
+Rollback: при тестовом «fault» (искусственный crash) — VM/контейнер восстанавливается к snapshot.
+10. Форматы артефактов и структура проекта (рекомендуемая)
+Проект в git с ветвлением:
+repo-root/
+backend/ (FastAPI orchestrator + tools)
+app/
+main.py
+tools/
+browser.py
+shell.py
+git_ops.py
+models/ (LLM wrapper)
+schemas/ (Pydantic JSON schemas)
+sandbox/ (scripts для создания VM / Docker)
+docs/ (архитектура, security, runbook)
+examples/ (example tasks, prompts)
+requirements.txt
+README.md
+
+11. Примеры конкретных промптов и expected outputs (для Copilot)
+Task to LLM (create project):
+System: "You are ProjectAgent. Always respond with valid JSON. Do not execute commands; return plan calls only."
+User: {
+"task": "Create a dotnet REST API project called 'PoCApi' with a sample controller and unit tests",
+"constraints": ["use dotnet cli", "create git repo", "return plan as calls"],
+"output_format": "PLAN_CALLS"
+}
+Expected LLM JSON:
+{
+"plan": [
+{"step":1, "action":"project_builder", "params":{"template":"dotnet","name":"PoCApi"}},
+{"step":2, "action":"git_ops", "params":{"action":"init","params":{"message":"Initial commit"}}},
+{"step":3, "action":"shell_exec", "params":{"cmd":"dotnet build","cwd":"<project_path>"}}
+],
+"explain":"Создам проект, инициализирую git и соберу проект."
+}
+Human_approval prompt:
+Human UI shows request with request_id, description, affected files, estimated impact, "Approve / Reject" buttons.
+12. Логирование и отладка
+Все вызовы сохранять в папку logs/ как JSONL с полями: timestamp, request_id, model_id, prompt_hash, actions, tool_responses, sandbox_snapshot_id, exit_status. Для воспроизводимости сохранять seed генерации (если применимо) и версию библиотек (pip freeze output).
+
+13. Ограничения и предупреждения (важно)
+gpt‑oss‑20b на RTX 4090 может не поместиться без специальной 4‑bit квантзации и оффлоада; будьте готовы использовать cloud‑fallback или более лёгкую модель при отладке.
+Не запускайте shell/GUI без sandbox и snapshot. Любая автоматизация GUI не надёжна и хрупка.
+Автономное создание «сложного проекта» требует человека‑ревью; автоматизация ускоряет рутины, но не заменяет инженера для архитектурных решений.
+14. Что я могу сделать дальше (предложения)
+Пришлите «да/нет» по каждому пункту в разделе Milestones — я составлю скрипты установки окружения под Windows (pip-команды, проверки CUDA/PyTorch), пример FastAPI‑шаблон инструментов и готовые промпт‑шаблоны.
+Если хотите, начну с PoC‑шаблона backend/app/main.py (FastAPI) с двумя эндпоинтами: /llm (wrapper) и /tool/project_builder (mock), чтобы вы могли быстро тестировать.
+Если всё понятно — скажите, хотите ли вы, чтобы я сгенерировал стартовый код / requirements.txt / пример FastAPI приложения для первой итерации (M1).

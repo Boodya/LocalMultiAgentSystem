@@ -1,0 +1,52 @@
+{
+  "llm": {
+    "provider": "azure", 
+    "ollama": {
+      "baseUrl": "http://127.0.0.1:11434",
+      "model": "gpt-oss:20b",
+      "options": {
+        "temperature": 0.2,
+        "num_ctx": 8192,
+        "timeout_s": 60,
+        "max_retries": 2,
+        "retry_backoff_s": 1.5
+      }
+    },
+    "azure": {
+      "endpoint": "",
+      "apiKey": null,
+      "deployment": "gpt-5-mini",
+      "apiVersion": "2024-12-01-preview",
+      "options": {
+        "temperature": 0.2,
+        "timeout_s": 60,
+        "max_retries": 2,
+        "retry_backoff_s": 1.5
+      }
+    }
+  },
+  "search": {
+    "provider": "ddg",
+    "ddg": {
+      "maxResults": 5,
+      "fetchMaxPages": 3,
+      "requestTimeoutS": 20,
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    },
+    "google": {
+      "apiKey": null,
+      "cx": null,
+      "dateRestrict": "d1"
+    },
+    "maxContextDocChars": 8000
+  },
+  "summarization": {
+    "retryIfShort": true,
+    "minChars": 120
+  },
+  "verbose": {
+    "plannerRequest": true,
+    "plannerResponse": true,
+    "maxDocPreviewChars": 300
+  }
+}
