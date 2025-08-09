@@ -57,6 +57,12 @@ def _default_config() -> Dict[str, Any]:
             "plannerRequest": True,
             "plannerResponse": True,
             "maxDocPreviewChars": 300
+        },
+        "tools": {
+            "allow": True,
+            "workingDir": "workspace",
+            "commandTimeoutS": 180,
+            "maxSteps": 12
         }
     }
 
@@ -141,6 +147,12 @@ GOOGLE_CSE_DATE_RESTRICT = cfg("search.google.dateRestrict", os.getenv("GOOGLE_C
 AZURE_ENDPOINT = cfg("llm.azure.endpoint", os.getenv("AZURE_ENDPOINT"))
 AZURE_DEPLOYMENT = cfg("llm.azure.deployment", os.getenv("AZURE_DEPLOYMENT"))
 AZURE_API_VERSION = cfg("llm.azure.apiVersion", os.getenv("AZURE_API_VERSION", "2024-05-01-preview"))
+
+# Tools config
+TOOLS_ALLOW = bool(cfg("tools.allow", True))
+TOOLS_WORKING_DIR = cfg("tools.workingDir", "workspace")
+TOOLS_CMD_TIMEOUT_S = int(cfg("tools.commandTimeoutS", 180))
+TOOLS_MAX_STEPS = int(cfg("tools.maxSteps", 12))
 
 
 def reload_config() -> None:

@@ -1,79 +1,87 @@
-# Локальный чат‑агент (PoC) — Ollama/Azure + веб‑поиск
+# Local Chat Agent (PoC) — Ollama/Azure + Web Search + Actions (PowerShell)
 
-Минимальный прототип локального чат‑агента на Windows с локальной LLM через Ollama (gpt-oss:20b) или облачной LLM через Azure AI Foundry, с веб‑поиском (DuckDuckGo или Google CSE) и извлечением текста страниц для ответа с источниками.
+Minimal local chat agent for Windows. Uses a local LLM via Ollama (gpt-oss:20b) or a cloud LLM via Azure AI Foundry. Includes web search (DuckDuckGo or Google CSE) and page text extraction for answers with sources. Also includes an autonomous action mode to plan and execute PowerShell steps (create files, run commands) end-to-end.
 
-## Возможности
-- Локальная LLM через Ollama (gpt-oss:20b) или облачная через Azure
-- Простая логика агента (двухшаговый план):
-  1) решить, нужен ли интернет-поиск; 2) при необходимости — поиск и краткое чтение страниц; 3) итоговый ответ с источниками
-- Поиск DuckDuckGo (без API ключа) или Google Custom Search (при наличии ключей)
-- Загрузка HTML и извлечение чистого текста (requests + BeautifulSoup)
-- Интерактивный CLI
+## Features
+- LLM providers: Ollama (gpt-oss:20b) or Azure AI Foundry
+- Simple agent loop for Q&A:
+  1) decide if web is needed; 2) search and fetch; 3) summarize with sources
+- Web search: DuckDuckGo (no key) or Google Custom Search (with keys)
+- HTML fetch + clean text (requests + BeautifulSoup)
+- Interactive CLI
+- Autonomous action mode (/task): plans steps, writes files, runs PowerShell commands, iterates up to a limit
 
-## Предварительные требования
+## Requirements
 - Windows 10/11, PowerShell
 - Python 3.9–3.12
-- Установленный и запущенный Ollama
-  - Скачать: https://ollama.com/download
-  - В терминале: `ollama pull gpt-oss:20b`
+- Ollama installed and running (for local mode)
+  - Download: https://ollama.com/download
+  - In terminal: `ollama pull gpt-oss:20b`
 
-## Установка
+## Setup
 ```powershell
-# В корне репозитория
+# At the repo root
 python -m venv .venv
 . .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-Убедитесь, что сервис Ollama запущен (приложение Ollama открыто или служба работает), и модель загружена:
+Make sure Ollama service is running and model pulled:
 ```powershell
 ollama pull gpt-oss:20b
 ```
 
-## Запуск
+## Run
 ```powershell
 python app.py
 ```
-- Введите вопрос. Агент сам решит, нужен ли поиск.
-- Чтобы запретить веб-поиск и отвечать только оффлайн:
+- Ask your question. The agent will decide whether to search.
+- Disable web usage:
 ```powershell
 python app.py --no-web
 ```
-- Команда выхода: `/exit`
+- Quit: `/exit`
 
-### Полезные команды
-- Принудительный веб‑поиск для запроса:
+### Useful commands
+- Force web search for a prompt:
 ```powershell
 python app.py --verbose
-# затем в интерактиве:
-/web Что нового в Python 3.13?
+# then in the interactive prompt:
+/web What’s new in Python 3.13?
 ```
-- Показ «мыслей» (план, краткая причина, шаги, поиск и загрузка страниц):
+- Show “thinking” (planning/search steps):
 ```powershell
 python app.py --verbose
 ```
+- Reuse context:
+  - List cached pages: `/ctx`
+  - Summarize cached pages with a new prompt: `/summarize Summarize briefly`
 
-### Повторное использование контекста
-- Показ последних загруженных страниц: в интерактиве введите `/ctx`
-- Суммаризация последних страниц другим запросом: `/summarize Кратко подведи итоги`
+### Autonomous actions (PowerShell)
+- Run an end-to-end task with planning and stepwise execution:
+  - `/task build a snake game in Python`
+- The agent will plan 1–3 steps at a time (write files, run PowerShell commands) inside the workspace directory and iterate up to a configurable step limit.
+- Logs are printed with the [act] prefix.
 
-## Конфигурация (appconfig.json + переменные окружения)
-Все настройки вынесены в `appconfig.json` в корне репозитория. Часть чувствительных полей можно (и удобно) переопределять переменными окружения.
+## Configuration (appconfig.json + environment variables)
+All settings live in `appconfig.json` at the repo root. Sensitive values can be overridden via environment variables.
 
-Основные секции:
-- llm: выбор провайдера и параметры
-  - provider: "ollama" или "azure"
+Main sections:
+- llm: provider and options
+  - provider: "ollama" or "azure"
   - ollama: baseUrl, model, options (temperature, num_ctx, timeout_s, max_retries, retry_backoff_s)
-  - azure: endpoint, deployment, apiKey (может задаваться переменной окружения), apiVersion, options
-- search: выбор поискового провайдера и параметры
-  - provider: "ddg" (по умолчанию) или "google"
+  - azure: endpoint, deployment, apiKey, apiVersion, options
+- search: provider and options
+  - provider: "ddg" (default) or "google"
   - ddg: maxResults, fetchMaxPages, requestTimeoutS, userAgent
   - google: apiKey, cx, dateRestrict
-  - maxContextDocChars: максимум символов в совокупном контексте
+  - maxContextDocChars: max combined characters for context
 - summarization: retryIfShort, minChars
-- verbose: флаги для подробного лога планировщика и превью документов
+- verbose: planner/log options
+- tools: autonomous execution options
+  - allow (reserved), workingDir (default "workspace"), commandTimeoutS (default 180), maxSteps (default 12)
 
-Пример `appconfig.json` (фрагмент):
+Example appconfig.json (partial):
 ```json
 {
   "llm": {
@@ -89,67 +97,72 @@ python app.py --verbose
   "search": {
     "provider": "ddg",
     "google": { "apiKey": null, "cx": null, "dateRestrict": "d1" }
+  },
+  "tools": {
+    "workingDir": "workspace",
+    "commandTimeoutS": 180,
+    "maxSteps": 12
   }
 }
 ```
 
-### Переменные окружения (override)
-Вы можете переопределить часть настроек через переменные окружения (приоритетнее, чем файл):
-- AZURE_API_KEY — ключ для Azure AI Foundry; при наличии подставляется в `llm.azure.apiKey`
-- AZURE_ENDPOINT — адрес ресурса Azure, подставляется в `llm.azure.endpoint` (например, `https://<resource>.openai.azure.com`)
-- AZURE_DEPLOYMENT — имя деплоймента модели, подставляется в `llm.azure.deployment`
-- SEARCH_PROVIDER — `ddg` или `google`, переопределяет `search.provider`
-- GOOGLE_CSE_API_KEY — API‑ключ для Google Custom Search
-- GOOGLE_CSE_CX — идентификатор поисковой системы (cx) для Google CSE
-- GOOGLE_CSE_DATE_RESTRICT — ограничение по дате (например, `d1`, `w1`, `m1`), по умолчанию `d1`
+### Environment variables (override)
+You can override part of the config via env vars (they take precedence):
+- AZURE_API_KEY — overrides `llm.azure.apiKey`
+- AZURE_ENDPOINT — overrides `llm.azure.endpoint` (e.g., `https://<resource>.openai.azure.com`)
+- AZURE_DEPLOYMENT — overrides `llm.azure.deployment`
+- AZURE_API_VERSION — overrides `llm.azure.apiVersion` (default `2024-05-01-preview`)
+- SEARCH_PROVIDER — `ddg` or `google`, overrides `search.provider`
+- GOOGLE_CSE_API_KEY — API key for Google Custom Search
+- GOOGLE_CSE_CX — Search engine id (cx) for Google CSE
+- GOOGLE_CSE_DATE_RESTRICT — e.g., `d1`, `w1`, `m1` (default `d1`)
 
-В PowerShell (только на текущую сессию):
+PowerShell (current session only):
 ```powershell
 $env:AZURE_API_KEY = "<your_azure_key>"
 $env:AZURE_ENDPOINT = "https://<resource>.openai.azure.com"
 $env:AZURE_DEPLOYMENT = "<your_deployment_name>"
+$env:AZURE_API_VERSION = "2024-05-01-preview"
 $env:SEARCH_PROVIDER = "google"
 $env:GOOGLE_CSE_API_KEY = "<your_google_api_key>"
 $env:GOOGLE_CSE_CX = "<your_cx>"
 $env:GOOGLE_CSE_DATE_RESTRICT = "d1"
 ```
 
-Примечание: команда `set VAR=...` — это синтаксис cmd.exe. В PowerShell используйте `$env:VAR = "..."`. Если вы укажете `set AZURE_API_KEY=...` внутри PowerShell, это не создаст переменную окружения для текущего процесса Python.
+Note: `set VAR=...` is cmd.exe syntax. In PowerShell use `$env:VAR = "..."`. Using `set` inside PowerShell won’t set env vars for the Python process.
 
-## Как работает Azure‑конфигурация
-Чтобы использовать Azure AI Foundry вместо локальной Ollama:
-1) В `appconfig.json` установите `llm.provider` в "azure".
-2) Заполните в секции `llm.azure`:
-   - `endpoint`: например, `https://<resource>.openai.azure.com`
-   - `deployment`: имя вашего развертывания модели (например, `gpt-4o-mini` или другое)
-   - `apiKey`: можно оставить `null` и задать через переменную окружения `AZURE_API_KEY`
-   - `apiVersion`: при необходимости измените (по умолчанию `2024-05-01-preview`)
-3) Запустите CLI как обычно. Если не все обязательные поля заданы, агент сообщит об ошибке конфигурации.
+## Azure configuration
+To use Azure instead of local Ollama:
+1) Set `llm.provider` to `"azure"` in `appconfig.json`.
+2) Fill `llm.azure`: `endpoint`, `deployment`, `apiKey` (or set via env), and optionally `apiVersion`.
+3) Run the CLI. If any required fields are missing, the agent will report a clear configuration error.
 
-Примечания:
-- Ключ берётся так: сначала `AZURE_API_KEY` из окружения; если его нет — поле `llm.azure.apiKey` из `appconfig.json`.
-- Если `endpoint`, `deployment` или ключ не заданы — и выбран провайдер `azure` — агент выбросит понятную ошибку с подсказкой.
-- Параметры ретраев/таймаутов для Azure читаются из `llm.azure.options`.
+Notes:
+- The API key is taken from `AZURE_API_KEY` first, then from `appconfig.json`.
+- If `endpoint`, `deployment`, or key are missing (with provider `azure`), the agent will error with guidance.
+- Retry/timeout settings for Azure are under `llm.azure.options`.
 
-## Переключение поискового провайдера
-- По умолчанию используется DuckDuckGo (без ключей).
-- Для Google CSE задайте в `appconfig.json` `search.provider = "google"` и укажите `google.apiKey` и `google.cx` (или задайте через переменные окружения, см. выше).
+## Switch search provider
+- Default: DuckDuckGo (no keys required).
+- For Google CSE, set `search.provider = "google"` and specify `google.apiKey` and `google.cx` (or set via env vars).
 
-## Советы
-- Первый ответ может быть медленным из-за «прогрева» модели.
-- Для вопросов, требующих актуальной информации, агент выполнит поиск и приведёт источники.
-- Параметры (лимиты поиска/таймауты) настраиваются в `src/agent/config.py`.
+## Tips
+- The very first response may be slower due to model warm-up.
+- For time-sensitive questions the agent will search and include sources.
+- Tunables (limits/timeouts) are in `src/agent/config.py` and `appconfig.json`.
 
-## Структура
-- `app.py` — CLI вход
-- `src/agent/agent.py` — простая ReAct‑петля (планирование → поиск → ответ)
-- `src/agent/llm.py` — провайдеры LLM (Ollama и Azure) + фабрика
-- `src/agent/web_search.py` — поиск (DDG/Google CSE) и загрузка страниц
-- `src/agent/config.py` — конфигурация (appconfig.json + env‑override)
-- `appconfig.json` — файл конфигурации
+## Project structure
+- `app.py` — CLI entry
+- `src/agent/agent.py` — plan → (optional) search → summarize with sources
+- `src/agent/llm.py` — LLM providers (Ollama/Azure) + factory
+- `src/agent/web_search.py` — search (DDG/Google CSE) and page fetching
+- `src/agent/config.py` — configuration (appconfig.json + env overrides)
+- `src/agent/tools.py` — PowerShell runner and simple FS helpers
+- `src/agent/action_agent.py` — autonomous planning/execution agent
+- `appconfig.json` — configuration file
 
-## Устранение неполадок
-- Ошибка соединения с Ollama: проверьте, что Ollama запущен и модель `gpt-oss:20b` загружена.
-- Проблемы с установкой `lxml`: обновите pip и wheel: `pip install --upgrade pip wheel` и повторите установку.
-- Некоторые сайты могут блокировать запросы — агент продолжит с доступными результатами.
-- При провайдере `azure`: убедитесь, что заданы `endpoint`, `deployment` и `apiKey` (через переменную окружения или файл). В противном случае будет брошена ошибка конфигурации.
+## Troubleshooting
+- Ollama connection error: ensure Ollama is running and `gpt-oss:20b` is pulled.
+- lxml install issues: upgrade pip and wheel (`pip install --upgrade pip wheel`) and reinstall.
+- Some sites may block scraping — the agent will continue with available results.
+- Azure provider: ensure `endpoint`, `deployment`, and `apiKey` are set (via env or file). Otherwise you’ll get a configuration error.

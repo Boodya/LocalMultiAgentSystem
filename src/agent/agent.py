@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .llm import make_chat_client
 from .web_search import search_and_fetch
@@ -37,18 +37,27 @@ def _sources_label_for(text: str) -> str:
 
 
 class ChatAgent:
-    def __init__(self, allow_web: bool = True, verbose: bool = False, printer=None):
+    def __init__(self, allow_web: bool = True, verbose: bool = False, printer=None, memory: Optional[object] = None):
         self.allow_web = allow_web
         self.verbose = verbose
         self.print = printer or (lambda *_args, **_kwargs: None)
         # Initialize chat client (Ollama or Azure) from config
         self.llm = make_chat_client()
         self._last_context_pages = []
+        self.memory = memory
 
     def plan(self, user_query: str) -> Dict:
-        messages = [
-            {"role": "user", "content": f"Question: {user_query}\n\n{PLANNER_USER_PROMPT}"}
-        ]
+        # Include recent conversation context to help with follow-ups
+        content = ""
+        if getattr(self, "memory", None):
+            try:
+                bullets = self.memory.as_bullets(8)
+            except Exception:
+                bullets = ""
+            if bullets:
+                content += f"Recent conversation (most recent last):\n{bullets}\n\n"
+        content += f"Question: {user_query}\n\n{PLANNER_USER_PROMPT}"
+        messages = [{"role": "user", "content": content}]
         if self.verbose and getattr(config, "VERBOSE_SHOW_PLANNER_REQUEST", True):
             self.print("planner.request: JSON plan requested (need_search, queries, answer, reason, steps)")
         plan = self.llm.chat_json(messages, schema_hint=PLANNER_SCHEMA_HINT, temperature=0.1)
@@ -130,6 +139,23 @@ class ChatAgent:
         return final
 
     def handle_query(self, user_query: str, force_web: bool = False) -> str:
+        # Special handling: if user asks to recall conversation, summarize memory
+        uq_lower = (user_query or "").strip().lower()
+        recall_triggers = [
+            # Russian
+            "о чем мы", "что мы обсуждали", "что я тебя спрашивал", "история разговора", "из контекста",
+            # English
+            "what did we talk", "what have we discussed", "conversation history", "what we just talked"
+        ]
+        if getattr(self, "memory", None) and any(t in uq_lower for t in recall_triggers):
+            try:
+                bullets = self.memory.as_bullets(12, max_chars=240)  # type: ignore[attr-defined]
+            except Exception:
+                bullets = ""
+            if bullets:
+                return f"Here's a brief recap of our recent conversation:\n\n{bullets}"
+            # fall through if no bullets
+
         # If we have recent context and the user asks to work with "these pages/sources",
         # skip planning and directly answer from the cached context.
         uq = (user_query or "").strip().lower()
@@ -154,7 +180,15 @@ class ChatAgent:
             if plan.get("answer"):
                 return plan["answer"]
             try:
-                resp = self.llm.chat([{"role": "user", "content": user_query}], temperature=0.2)
+                sys = None
+                if getattr(self, "memory", None):
+                    try:
+                        bullets = self.memory.as_bullets(8)
+                    except Exception:
+                        bullets = ""
+                    if bullets:
+                        sys = "Use the following recent conversation context if it helps answer the user succinctly.\n\n" + bullets
+                resp = self.llm.chat([{"role": "user", "content": user_query}], temperature=0.2, system_prompt=sys)
                 return resp
             except Exception as e:
                 return f"[LLM error: {e}]"
