@@ -16,8 +16,9 @@ def main():
     def thinker(msg: str) -> None:
         print(Fore.MAGENTA + "[think] " + Style.RESET_ALL + msg)
 
-    agent = ChatAgent(allow_web=not args.no_web, verbose=args.verbose, printer=thinker, memory=memory)
+    # Initialize memory before passing it into the ChatAgent
     memory = ConversationMemory(max_messages=30)
+    agent = ChatAgent(allow_web=not args.no_web, verbose=args.verbose, printer=thinker, memory=memory)
 
     print(Fore.GREEN + "Local Agent ready. Type your question. Type /exit to quit.")
     print(Fore.GREEN + "Tips: /web <q> force search; /ctx list cached sources; /summarize <q> summarize cached pages; /task <goal> run autonomous task.")
